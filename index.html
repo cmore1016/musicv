@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Visualizer — Chill / Kaleidoscope / Color Pulse</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root{
+    --ui-bg: rgba(6,6,8,0.56);
+    --accent: #7ef0ff;
+  }
+  html,body{height:100%;margin:0;background:#000;font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,Arial;}
+  #container{position:relative;height:100vh;overflow:hidden}
+  canvas{width:100%;height:100%;display:block}
+
+/* Title UI */
+  #title{
+    position:absolute; inset:0; z-index:12;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    color:#fff; text-align:center; transition:opacity .5s ease, transform .45s ease;
+    pointer-events:auto; backdrop-filter: blur(6px);
+  }
+  #title.hidden{opacity:0; transform:translateY(8px) scale(.995); pointer-events:none;}
+  h1{font-size:34px;margin:0 0 12px 0; color:#eefcff; text-shadow:0 8px 22px rgba(0,0,0,0.6);}
+  .subtitle{margin:0 0 18px 0;color:rgba(255,255,255,0.76);max-width:640px;font-size:15px;}
+  .modes{display:flex;gap:12px;}
+  .modeBtn{padding:12px 22px;border-radius:12px;font-size:18px;color:#fff;background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.08);cursor:pointer;box-shadow:0 8px 30px rgba(0,0,0,0.6);display:flex;align-items:center;gap:10px;transition:transform .16s,filter .16s;}
+  .modeBtn:hover{transform:translateY(-6px) scale(1.02);filter:brightness(1.04);}
+  .modeBtn .dot{width:12px;height:12px;border-radius:50%}
+  .modeBtn.chill .dot{background:var(--accent);box-shadow:0 10px 28px rgba(126,240,255,0.12)}
+  .modeBtn.kaleido .dot{background:linear-gradient(45deg,var(--accent),#ff8a8a);box-shadow:0 10px 28px rgba(220,140,240,0.10)}
+  .modeBtn.colorpulse .dot{background:linear-gradient(90deg,#ffd36b,#7ef0ff,#ff8a8a);box-shadow:0 10px 28px rgba(255,180,110,0.10)}
+
+/* pick overlay */
+  #pickOverlay{position:absolute;inset:0;z-index:13;display:flex;align-items:center;justify-content:center;pointer-events:none;opacity:0;transition:opacity .45s ease;background:linear-gradient(rgba(0,0,0,0.08),rgba(0,0,0,0.5));}
+  #pickOverlay.visible{opacity:1;pointer-events:auto}
+  .overlayText{padding:16px 24px;border-radius:12px;background:var(--ui-bg);border:1px solid rgba(255,255,255,0.04);backdrop-filter:blur(6px);font-size:18px;color:#fff;cursor:pointer;box-shadow:0 10px 30px rgba(0,0,0,0.6)}
+
+/* controls */
+  #controls{position:absolute;right:18px;bottom:18px;z-index:20;display:flex;gap:10px;align-items:center;display:none}
+  .ctrl{width:48px;height:48px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.90);border:none;cursor:pointer;font-size:18px;box-shadow:0 10px 30px rgba(0,0,0,0.5);transition:transform .12s}
+  .ctrl:hover{transform:translateY(-6px)}
+
+/* hint */
+  #hint{position:absolute;left:16px;bottom:16px;color:rgba(255,255,255,0.65);z-index:20;font-size:13px}
+
+/* responsive */
+  @media (max-width:560px){
+    h1{font-size:24px}
+    .modeBtn{padding:10px 14px;font-size:16px}
+    .overlayText{font-size:16px;padding:12px 16px}
+    .ctrl{width:44px;height:44px}
+  }
+</style>
+</head>
+<body>
+<div id="container">
+  <canvas id="gl"></canvas>
+
+  <div id="title">
+    <h1>Choose Your Vibe</h1>
+    <div class="subtitle">Pick a mode, then click anywhere to add a file — for the experience. Works with camera roll videos — playback starts automatically.</div>
+    <div class="modes">
+      <button class="modeBtn chill" data-mode="Chill"><span class="dot"></span>Chill</button>
+      <button class="modeBtn kaleido" data-mode="Kaleidoscope"><span class="dot"></span>Kaleidoscope</button>
+      <button class="modeBtn colorpulse" data-mode="ColorPulse"><span class="dot"></span>Color Pulse</button>
+    </div>
+  </div>
+
+  <div id="pickOverlay"><div class="overlayText" id="pickText">Click anywhere to add file — <em>for the experience</em></div></div>
+
+  <div id="controls">
+    <button id="pauseBtn" class="ctrl" title="Pause">❚❚</button>
+    <button id="restartBtn" class="ctrl" title="Restart">⟲</button>
+  </div>
+
+  <div id="hint">Click overlay → pick file (that click enables playback). Space = pause/play</div>
+  <input id="fileInput" type="file" accept="audio/*,video/*" style="display:none" />
+</div>
+
+<script>
+/* ------------------------------
+   Visualizer: Chill / Kaleidoscope / ColorPulse
+   - Click overlay to pick a file (this is the user gesture)
+   - Supports audio & camera-roll videos (muted-unmute iOS trick)
+   - Mood-based palettes affect all modes
+   - Chill: flowing non-reflective fractal/liquid
+   - Kaleidoscope: chaotic mirrored slices + jitter on beats
+   - ColorPulse: punchy shapes + frequent palette changes on loud beats
+   ------------------------------ */
+
+const canvas = document.getElementById('gl');
+const title = document.getElementById('title');
+const pickOverlay = document.getElementById('pickOverlay');
+const pickText = document.getElementById('pickText');
+const fileInput = document.getElementById('fileInput');
+const controls = document.getElementById('controls');
+const pauseBtn = document.getElementById('pauseBtn');
+const restartBtn = document.getElementById('restartBtn');
+
+let mode = null;
+let modeType = -1; // -1 title, 0 chill, 1 kaleido, 2 colorpulse
+
+let audioEl = null, audioCtx = null, analyser = null, dataArray = null;
+let lastBeatTime = 0;
+const beatCooldown = 220; // ms
+
+// WebGL2 setup
+const gl = canvas.getContext('webgl2', {antialias:true});
+if(!gl){ alert('WebGL2 required'); throw new Error('No WebGL2'); }
+
+// Vertex
+const VERT = `#version 300 es
+in vec2 position;
+void main(){ gl_Position = vec4(position,0.0,1.0); }
+`;
+
+// Fragment: single shader with 3 mode branches and shared palette uniforms
+const FRAG = `#version 300 es
+precision highp float;
+out vec4 outColor;
+uniform vec2 iResolution;
+uniform float iTime;
+uniform float bass, mid, treble;
+uniform int modeType;
+uniform vec3 uA, uB, uC;
+
+// helpers
+mat2 rot(float a){float c=cos(a), s=sin(a); return mat2(c,-s,s,c);}
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123);}
+float noise(vec2 p){vec2 i=floor(p), f=fract(p), u=f*f*(3.0-2.0*f); return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),u.x), mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),u.x), u.y);}
+float fbm(vec2 p){float v=0.0, a=0.5; for(int i=0;i<6;i++){ v+=a*noise(p); p*=2.0; a*=0.5;} return v;}
+vec3 pal(float t){ if(t<0.5) return mix(uA,uB,t*2.0); else return mix(uB,uC,(t-0.5)*2.0); }
+vec2 kaleido(vec2 p, float slices){ float a=atan(p.y,p.x), r=length(p); float seg=6.28318530718/max(1.0,slices); a=mod(a+seg*0.5,seg)-seg*0.5; a=abs(a); return vec2(cos(a),sin(a))*r; }
+
+// Title BG (darker)
+vec3 titleBG(vec2 uv, float t){
+  vec2 p = uv * 1.2;
+  float w = fbm(p*0.9 + vec2(t*0.03, -t*0.02));
+  float w2 = fbm(p*2.6 + vec2(-t*0.05, t*0.03));
+  vec3 base = vec3(0.02,0.03,0.05);
+  vec3 layer = vec3(0.04,0.05,0.08);
+  float band = smoothstep(-0.3,0.6, sin((p.x+p.y)*2.2 + w*3.2 + t*0.35) + w2*0.5 );
+  vec3 col = mix(base, layer, band);
+  col = mix(col, vec3(0.12,0.10,0.16), smoothstep(0.15,0.9,w));
+  vec2 kk = kaleido(p*0.9 + w*0.1, 8.0 + 2.0*sin(t*0.08));
+  col += 0.04 * vec3(0.6,0.7,0.9) * fbm(kk*3.8 + t*0.05);
+  return pow(col, vec3(0.95));
+}
+
+// Mode 0 - Chill: flowing, non-reflective fractal/liquid
+vec4 visualChill(vec2 uv,float t,float b,float m,float h){
+  uv *= 1.0 + b*0.45;
+  uv *= rot(t*0.06 + 0.4*h);
+  // layered flowing noise (no mirror)
+  float f1 = fbm(uv*1.6 + vec2(t*0.12, -t*0.08));
+  float f2 = fbm(uv*3.6 + vec2(-t*0.14, t*0.09));
+  float pattern = mix(f1, f2, smoothstep(0.0, 1.0, sin(t*0.2 + f2*3.0)));
+  // soft swirls
+  vec3 col = pal(fract(pattern*0.8 + t*0.02));
+  // gentle center glow on bass
+  float r = length(uv);
+  col += uC * exp(-r*4.0) * b*1.2;
+  col = pow(col, vec3(0.95));
+  col *= smoothstep(1.4,0.18, r);
+  return vec4(clamp(col,0.0,1.0),1.0);
+}
+
+// Mode 1 - Kaleidoscope (chaotic): mirrored slices but jittery + bursts on beats
+vec4 visualKale(vec2 uv,float t,float b,float m,float h){
+  // larger motion, more chaotic
+  uv *= 1.0 + b*0.7;
+  float jitter = sin(t*1.8 + fbm(uv*3.0)*6.0)*0.12;
+  uv *= rot(t*0.14 + jitter*h*1.8);
+  // variable slices driven by treble and randomness
+  float slices = mix(5.0, 12.0, clamp(1.0*h + 0.8*m,0.0,1.0));
+  // introduce chaotic offset per slice
+  vec2 k = kaleido(uv + vec2(sin(t*1.2)*0.04, cos(t*0.9)*0.03) + fbm(uv*2.2)*0.08, slices);
+  float r = length(uv);
+  float wav = fbm(k*4.0 + vec2(t*0.6, -t*0.3));
+  float edges = smoothstep(0.35,0.65,fract(wav*6.0 + sin((k.x+k.y)*10.0)));
+  vec3 base = pal(fract(wav*0.5 + t*0.03));
+  // chaotic bursts accent on strong bass
+  base += uB * edges * (0.6 + b*1.4);
+  // occasional distortion by randomness (gives glitch)
+  float glitch = smoothstep(0.6,1.0,fract(fbm(k*8.0 + t*1.2)*10.0));
+  base = mix(base, base * vec3(1.6,1.2,1.1), glitch*0.8);
+  base = pow(base, vec3(1.02));
+  base *= smoothstep(1.4,0.12,r);
+  return vec4(clamp(base,0.0,1.0), 1.0);
+}
+
+// Mode 2 - Color Pulse: punchy shapes, frequent color switches on loud beats
+vec4 visualPulse(vec2 uv,float t,float b,float m,float h){
+  uv *= 1.0 + b*0.9;
+  uv *= rot(t*0.18 + h*1.6);
+  vec2 p = uv*vec2(1.0,0.92);
+  // triangular / shardy shapes using abs/fract
+  float n = fbm(p*3.0 + vec2(t*0.8, -t*0.45) + b*3.5);
+  float detail = fbm(p*9.0 + n*5.0);
+  float shards = smoothstep(0.15,0.55,fract(detail*7.0 + n*3.5));
+  float pattern = sin((p.x - p.y)*12.0 + n*9.0 + t*2.6);
+  vec3 col = pal(fract(0.5 + pattern*0.24 + shards*0.3));
+  // stronger beat accent: expand/brighten center
+  float pulse = exp(-length(uv)*6.0) * (1.0 + 10.0*b);
+  col += mix(vec3(0.0), uA, pulse*1.0);
+  col = pow(abs(col), vec3(1.06));
+  col *= smoothstep(1.0,0.06,length(uv));
+  return vec4(clamp(col,0.0,1.0),1.0);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*iResolution.xy) / iResolution.y;
+  float t = iTime;
+
+  if(modeType == -1){
+    vec3 bg = titleBG(uv*0.9, t*0.6);
+    outColor = vec4(bg,1.0); return;
+  }
+
+  float b = pow(bass, 1.5);
+  float m = pow(mid, 1.08);
+  float h = pow(treble, 1.0);
+
+  if(modeType == 0) outColor = visualChill(uv,t,b,m,h);
+  else if(modeType == 1) outColor = visualKale(uv,t,b,m,h);
+  else outColor = visualPulse(uv,t,b,m,h);
+}
+`;
+
+// compile/link helpers
+function compile(src, type){
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if(!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+    console.error('Shader error:', gl.getShaderInfoLog(sh));
+    throw new Error('Shader compile failed');
+  }
+  return sh;
+}
+const vs = compile(VERT, gl.VERTEX_SHADER);
+const fs = compile(FRAG, gl.FRAGMENT_SHADER);
+const program = gl.createProgram();
+gl.attachShader(program, vs);
+gl.attachShader(program, fs);
+gl.bindAttribLocation(program, 0, 'position');
+gl.linkProgram(program);
+if(!gl.getProgramParameter(program, gl.LINK_STATUS)){
+  console.error('Program link error:', gl.getProgramInfoLog(program));
+  throw new Error('Program link failed');
+}
+gl.useProgram(program);
+
+// full-screen quad
+const verts = new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+
+// uniforms
+const uRes = gl.getUniformLocation(program,'iResolution');
+const uTime = gl.getUniformLocation(program,'iTime');
+const uBass = gl.getUniformLocation(program,'bass');
+const uMid = gl.getUniformLocation(program,'mid');
+const uTreble = gl.getUniformLocation(program,'treble');
+const uModeType = gl.getUniformLocation(program,'modeType');
+const uA = gl.getUniformLocation(program,'uA');
+const uB = gl.getUniformLocation(program,'uB');
+const uC = gl.getUniformLocation(program,'uC');
+
+// resize
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2.0);
+  const w = Math.floor(canvas.clientWidth * dpr);
+  const h = Math.floor(canvas.clientHeight * dpr);
+  if(canvas.width !== w || canvas.height !== h){
+    canvas.width = w; canvas.height = h;
+    gl.viewport(0,0,w,h);
+  }
+}
+window.addEventListener('resize', resize);
+resize();
+
+// mood palettes (arrays of [A,B,C])
+const PALETTES = {
+  warm: [
+    [[0.50,0.08,0.15],[0.92,0.46,0.10],[0.98,0.72,0.18]],
+    [[0.35,0.06,0.10],[0.78,0.28,0.22],[0.98,0.73,0.42]],
+    [[0.22,0.03,0.06],[0.80,0.16,0.22],[0.99,0.57,0.10]]
+  ],
+  bright: [
+    [[0.95,0.85,0.18],[0.32,0.95,0.56],[0.05,0.72,0.95]],
+    [[0.99,0.69,0.16],[0.45,0.96,0.45],[0.12,0.72,0.98]],
+    [[0.98,0.86,0.36],[0.66,0.98,0.45],[0.20,0.65,1.0]]
+  ],
+  cool: [
+    [[0.05,0.14,0.45],[0.10,0.76,0.98],[0.70,0.90,0.98]],
+    [[0.02,0.12,0.35],[0.03,0.60,0.95],[0.50,0.78,0.98]],
+    [[0.05,0.10,0.32],[0.12,0.65,0.9],[0.8,0.9,0.98]]
+  ]
+};
+
+let currentPalette = {A:[0.5,0.2,0.6], B:[0.2,0.7,0.9], C:[1.0,0.9,0.6]};
+let targetPalette = JSON.parse(JSON.stringify(currentPalette));
+let paletteLerpT = 1.0;
+const basePaletteSpeed = 1.0;
+
+function lerp(a,b,t){ return a + (b-a)*t; }
+function lerpColor(a,b,t){ return [ lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t) ]; }
+
+function setTargetPaletteFromMood(mood){
+  const list = PALETTES[mood] || PALETTES.cool;
+  const pick = list[Math.floor(Math.random()*list.length)];
+  targetPalette.A = pick[0].slice();
+  targetPalette.B = pick[1].slice();
+  targetPalette.C = pick[2].slice();
+  paletteLerpT = 0.0;
+}
+
+// audio setup (works for audio & video; uses iOS mute/unmute trick for video)
+function setupAudioFromFile(file){
+  // cleanup previous
+  if(audioEl){ try{ audioEl.pause(); }catch(e){} audioEl.src=''; audioEl=null; }
+  if(audioCtx){ try{ audioCtx.close(); }catch(e){} audioCtx=null; analyser=null; dataArray=null; }
+
+  const isVideo = file.type.startsWith('video');
+  const url = URL.createObjectURL(file);
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+  // create element (video or audio)
+  if(isVideo){
+    audioEl = document.createElement('video');
+    audioEl.setAttribute('playsinline','');
+    audioEl.style.display = 'none';
+  } else {
+    audioEl = document.createElement('audio');
+    audioEl.style.display = 'none';
+  }
+  audioEl.crossOrigin = 'anonymous';
+  audioEl.loop = true;
+  audioEl.src = url;
+  audioEl.controls = false;
+
+  // iOS workaround: start muted then unmute
+  // We'll attempt to play immediately — because we're inside user gesture (picker), browsers should allow it.
+  // For iOS, some versions insist on muted-first for video+WebAudio; this tries muted play then unmute.
+  let triedUnmute = false;
+  const tryPlay = async () => {
+    try {
+      // For video we briefly mute to ensure autoplay works reliably on mobile, then unmute.
+      if (isVideo) {
+        audioEl.muted = true;
+      }
+      const p = audioEl.play();
+      if (p !== undefined) {
+        await p.catch(()=>{ /* ignore */ });
+      }
+      // If video, unmute after small delay to bypass some iOS restrictions
+      if (isVideo) {
+        setTimeout(()=>{ try { audioEl.muted = false; } catch(e){} }, 220);
+      }
+    } catch (err) {
+      console.warn('play() failed', err);
+    }
+  };
+
+  // connect to WebAudio
+  const srcNode = audioCtx.createMediaElementSource(audioEl);
+  const gain = audioCtx.createGain();
+  gain.gain.value = 1.0;
+  srcNode.connect(gain).connect(analyser);
+  analyser.connect(audioCtx.destination);
+
+  // ensure we call play in same click chain: change handler will call tryPlay()
+  tryPlay();
+
+  controls.style.display = 'flex';
+  pauseBtn.textContent = '❚❚';
+
+  // initialize palette to cool on start but small randomization
+  setTargetPaletteFromMood('cool');
+}
+
+// avg frequency band
+function avgBand(f0,f1){
+  if(!analyser) return 0;
+  const bins = analyser.frequencyBinCount;
+  const nyq = audioCtx.sampleRate/2;
+  const binHz = nyq / bins;
+  let s = Math.max(0, Math.floor(f0/binHz));
+  let e = Math.min(bins-1, Math.floor(f1/binHz));
+  let sum=0, cnt=0;
+  for(let i=s;i<=e;i++){ sum += dataArray[i]; cnt++; }
+  if(cnt===0) return 0;
+  return (sum/cnt)/255;
+}
+
+// beat detection parameters
+let bassSmoothed = 0;
+const bassSmoothing = 0.72;
+const beatThresholdDefault = 0.14;
+const absBassMinDefault = 0.06;
+
+// render loop & palette & beat handling
+let startTime = performance.now();
+let lastTime = startTime;
+
+function render(now){
+  requestAnimationFrame(render);
+  resize();
+  const t = (now - startTime) * 0.001;
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+
+  // audio analysis
+  let b=0,m=0,h=0;
+  if(analyser){
+    analyser.getByteFrequencyData(dataArray);
+    b = avgBand(20,250);
+    m = avgBand(250,2000);
+    h = avgBand(2000, Math.min(16000, audioCtx.sampleRate/2));
+
+    // smoothing + beat detection per mode
+    bassSmoothed = bassSmoothed * bassSmoothing + b * (1-bassSmoothing);
+    const delta = b - bassSmoothed;
+    const nowMs = performance.now();
+
+    // mode-specific sensitivity:
+    let beatThreshold = beatThresholdDefault;
+    let absBassMin = absBassMinDefault;
+    if(modeType === 2){ // ColorPulse -> more sensitive
+      beatThreshold = 0.10;
+      absBassMin = 0.04;
+    } else if(modeType === 1){ // Kaleido -> moderate
+      beatThreshold = 0.13;
+    } else { // Chill -> less sensitive
+      beatThreshold = 0.16;
+    }
+
+    if(delta > beatThreshold && b > absBassMin && (nowMs - lastBeatTime) > beatCooldown){
+      lastBeatTime = nowMs;
+      // determine mood from relative bands
+      const total = b + m + h + 1e-9;
+      const bf = b/total, mf = m/total, hf = h/total;
+      let mood = 'bright';
+      if(bf > mf && bf > hf) mood = 'warm';
+      else if(hf > mf && hf > bf) mood = 'cool';
+      else mood = 'bright';
+      // ColorPulse -> switch palette (frequent)
+      setTargetPaletteFromMood(mood);
+      paletteLerpT = 0.0;
+    }
+  }
+
+  // palette lerp: faster for ColorPulse
+  let speedFactor = (modeType === 2) ? 1.8 : 1.0;
+  if(paletteLerpT < 1.0) paletteLerpT = Math.min(1.0, paletteLerpT + dt * basePaletteSpeed * speedFactor);
+  currentPalette.A = lerpColor(currentPalette.A, targetPalette.A, paletteLerpT);
+  currentPalette.B = lerpColor(currentPalette.B, targetPalette.B, paletteLerpT);
+  currentPalette.C = lerpColor(currentPalette.C, targetPalette.C, paletteLerpT);
+
+  // draw shader
+  gl.useProgram(program);
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform1f(uTime, t);
+  gl.uniform1i(uModeType, modeType);
+  gl.uniform1f(uBass, b);
+  gl.uniform1f(uMid, m);
+  gl.uniform1f(uTreble, h);
+  gl.uniform3f(uA, currentPalette.A[0], currentPalette.A[1], currentPalette.A[2]);
+  gl.uniform3f(uB, currentPalette.B[0], currentPalette.B[1], currentPalette.B[2]);
+  gl.uniform3f(uC, currentPalette.C[0], currentPalette.C[1], currentPalette.C[2]);
+
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+}
+requestAnimationFrame(render);
+
+// UI wiring
+document.querySelectorAll('.modeBtn').forEach(btn=>{
+  btn.addEventListener('click', ()=>{
+    const chosen = btn.dataset.mode;
+    mode = chosen;
+    modeType = (chosen === 'Chill') ? 0 : (chosen === 'Kaleidoscope' ? 1 : 2);
+    title.classList.add('hidden');
+    setTimeout(()=>{ pickOverlay.classList.add('visible'); pickText.innerHTML = 'Click anywhere to add file — <em>for the experience</em>'; }, 250);
+  });
+});
+
+// Click overlay -> open picker (this click is the required user gesture)
+document.addEventListener('click', (e)=>{
+  if(pickOverlay.classList.contains('visible')){
+    fileInput.click();
+  }
+});
+
+// File changed: start playback immediately and connect to WebAudio
+fileInput.addEventListener('change', async (e)=>{
+  if(!e.target.files.length) return;
+  const f = e.target.files[0];
+
+  // hide overlay
+  pickOverlay.classList.remove('visible');
+
+  // Setup and play
+  // Because fileInput was opened by click, this handler runs inside user gesture chain allowing play()
+  setupAudioFromFile(f);
+});
+
+// Pause/play
+pauseBtn.addEventListener('click', ()=>{
+  if(!audioEl) return;
+  if(audioEl.paused){ audioEl.play().catch(()=>{}); pauseBtn.textContent='❚❚'; }
+  else { audioEl.pause(); pauseBtn.textContent='▶'; }
+});
+window.addEventListener('keydown', (e)=>{ if(e.code==='Space' && audioEl){ e.preventDefault(); pauseBtn.click(); }});
+
+// Restart -> stop audio & go back to title with fade
+restartBtn.addEventListener('click', ()=>{
+  if(audioEl){ try{ audioEl.pause(); }catch(e){} audioEl.src=''; audioEl=null; }
+  if(audioCtx){ try{ audioCtx.close(); }catch(e){} audioCtx=null; analyser=null; dataArray=null; }
+  controls.style.display = 'none';
+  pickOverlay.classList.remove('visible');
+  title.classList.remove('hidden');
+  mode = null; modeType = -1;
+  setTargetPaletteFromMood('cool');
+  paletteLerpT = 0.0;
+});
+
+// helper: set initial palette
+function setTargetPaletteFromMood(mood){
+  const list = PALETTES[mood] || PALETTES.cool;
+  const pick = list[Math.floor(Math.random()*list.length)];
+  targetPalette.A = pick[0].slice();
+  targetPalette.B = pick[1].slice();
+  targetPalette.C = pick[2].slice();
+  paletteLerpT = 0.0;
+}
+setTargetPaletteFromMood('cool');
+
+// tiny resize call to initialize canvas correctly
+function resize(){ const dpr = Math.min(window.devicePixelRatio || 1, 2.0); const w = Math.floor(canvas.clientWidth*dpr); const h = Math.floor(canvas.clientHeight*dpr); if(canvas.width!==w||canvas.height!==h){ canvas.width=w; canvas.height=h; gl.viewport(0,0,w,h);} }
+window.addEventListener('resize', resize);
+resize();
+
+</script>
+</body>
+</html>
